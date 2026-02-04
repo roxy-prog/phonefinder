@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: phonefinder
+    database: waygroup-484205    # Your Google Cloud Project ID
+    schema: phonefinder          # Your BigQuery Dataset
+    tables:
+      - name: leadbyte_master    
