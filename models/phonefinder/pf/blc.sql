@@ -2,5 +2,5 @@
     {{ config(materialized='table') }}
 
     select * 
-    from {{ source('phonefinder', 'leadbyte_master') }}
+    from {{ source('Phonefinder', 'blc_sales_master') }}
 
