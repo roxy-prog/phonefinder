@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: Phonefinder
+  
+    tables:
+      - name: leadbyte_master
+      - name: blc_sales_master
+      - name: cellc_sales_master
+      - name: google_spend
+      - name: meta_spend
+      - name: mtn_sales_master
+      - name: pf_mapping
