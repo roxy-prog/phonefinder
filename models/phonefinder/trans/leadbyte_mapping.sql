@@ -1,102 +1,127 @@
-WITH leadbyte_data AS (
-    SELECT * FROM {{ ref('leadbyte') }}
+{{ config(materialized='table') }}
+WITH 
+
+original as (
+    select
+    DATE(CAST(left(created_date, 10) AS TIMESTAMP)) AS Original_Received,
+    SPLIT(SPLIT(created_date, 'T')[OFFSET(1)], '+')[OFFSET(0)] as time_string,
+    Lead_ID,
+    case when SSID like '%GOOGLE%' then 'Google'
+    when SSID like '%FACEBOOK%' then 'Meta' else SSID end as SSID,
+    case when SSID like '%GOOGLE%' then '278'    
+    when SSID like '%FACEBOOK%' then '278' else SID end as SID,
+    id_number,
+    blds_description,
+    blds_mtn,
+    blds_cellc,
+    blds_blc,
+    blds_mtn_BureauStatus,
+    blds_mtn_BureauPass,
+    LEFT(fb_ad_id, 18) as fb_ad_id,
+    fb_adset_id,
+    fb_campaign_id,
+    fb_clid,
+    gclid,
+    Id_number_valid,
+    fb_campaign_name,
+    fb_adset_name,
+    fb_ad_name
+    from {{ ref('leadbyte_rox') }}
 ),
 
--- Create unique mapping tables from metaspend to avoid row duplication (fan-out)
--- since metaspend likely has multiple rows per campaign (daily data).
-metaspend_campaigns AS (
-    SELECT DISTINCT 
-        Campaign_name, 
-        Campaign_ID
-    FROM {{ ref('metaspend') }}
-    WHERE Campaign_ID IS NOT NULL
+leadbyte_data AS (
+    SELECT
+    Lead_ID,
+    SID,
+    SSID,
+    Original_Received,
+    time_string,
+    id_number,
+    blds_description,
+    blds_mtn,
+    blds_cellc,
+    blds_blc,
+    blds_mtn_BureauStatus,
+    blds_mtn_BureauPass,
+    fb_ad_id,
+    fb_adset_id,
+    fb_campaign_id,
+    concat((case when fb_campaign_name like '%campaign.name%' then '' else fb_campaign_name end), (case when fb_adset_name like '%adset.name%' then '' else fb_adset_name end)) as concat_campaign_adset,
+    concat((case when fb_campaign_name like '%campaign.name%' then '' else fb_campaign_name end), (case when fb_adset_name like '%adset.name%' then '' else fb_adset_name end), (case when fb_ad_name like '%ad.name%' then '' else fb_ad_name end)) as concat_campaign_adset_ad_names,
+    concat((case when fb_campaign_id like '%campaign.id%' then '' else fb_campaign_id end), (case when fb_adset_id like '%adset.id%' then '' else fb_adset_id end), (case when fb_ad_id like '%ad.id%' then '' else fb_ad_id end)) as concat_ids,
+    fb_clid,
+    gclid,
+    Id_number_valid,
+    case when fb_campaign_name like '%campaign.name%' then '' else fb_campaign_name end as fb_campaign_name,
+    fb_adset_name,
+    fb_ad_name
+    FROM original
 ),
 
-metaspend_adsets AS (
-    SELECT DISTINCT 
-        Campaign_name, 
-        Ad_set_name, 
-        Ad_set_ID
-    FROM {{ ref('metaspend') }}
-    WHERE Ad_set_ID IS NOT NULL
-),
-
-metaspend_ads AS (
-    SELECT DISTINCT 
-        Campaign_name, 
-        Ad_set_name, 
-        Ad_name, 
-        Ad_ID,
-        Ad_set_ID -- Included for the fallback lookup logic
-    FROM {{ ref('metaspend') }}
-    WHERE Ad_ID IS NOT NULL
-),
-
-pf_mapping_data AS (
-    SELECT * FROM {{ source('Phonefinder', 'pf_mapping') }}
+-- Create a consolidated mapping with all three lookups combined
+mapping_consolidated AS (
+    SELECT
+        l.Lead_ID,
+        MAX(CASE WHEN m.concat_campaign_adset_ad = l.concat_campaign_adset_ad_names 
+                 THEN CAST(m.Actual_Ad_ID AS STRING) END) as lookup_ad_id,
+        MAX(CASE WHEN m.concat_campaign_adset = l.concat_campaign_adset 
+                 THEN CAST(m.Actual_Adset_ID AS STRING) END) as lookup_adset_id,
+        MAX(CASE WHEN m.fb_campaign_name = l.fb_campaign_name 
+                 THEN CAST(m.Actual_Campaign_ID AS STRING) END) as lookup_campaign_id
+    FROM leadbyte_data l
+    LEFT JOIN {{ ref('mapping') }} m
+        ON (l.concat_campaign_adset_ad_names = m.concat_campaign_adset_ad AND m.concat_campaign_adset_ad IS NOT NULL AND m.concat_campaign_adset_ad <> '')
+        OR (l.concat_campaign_adset = m.concat_campaign_adset AND m.concat_campaign_adset IS NOT NULL AND m.concat_campaign_adset <> '')
+        OR (l.fb_campaign_name = m.fb_campaign_name AND m.fb_campaign_name IS NOT NULL AND m.fb_campaign_name <> '')
+    GROUP BY l.Lead_ID
 )
 
 SELECT
-    lb.* EXCEPT (fb_campaign_id, fb_adset_id, fb_ad_id),
-
-    -- 1. CAMPAIGN ID LOGIC
-    COALESCE(
-        -- First: Try keeping the original if it is valid (numerical)
-        SAFE_CAST(lb.fb_campaign_id AS INT64),
-        -- Second: Match with metaspend on Campaign Name
-        ms_camp.Campaign_ID,
-        -- Third: Match with pf_mapping on Campaign Name
-        pf_camp.Actual_Campaign_ID
-    ) AS fb_campaign_id,
-
-    -- 2. ADSET ID LOGIC
-    COALESCE(
-        -- First: Try keeping the original if it is valid
-        SAFE_CAST(lb.fb_adset_id AS INT64),
-        -- Second: Match with metaspend (Campaign Name AND (Adset Name OR Ad Name))
-        ms_adset.Ad_set_ID,
-        -- Third: Match with metaspend using just Ad ID (if Ad ID exists in Leadbyte)
-        ms_ad_lookup.Ad_set_ID,
-        -- Fourth: Match with pf_mapping (Campaign Name AND Adset Name)
-        pf_adset.Actual_Adset_ID
-    ) AS fb_adset_id,
-
-    -- 3. AD ID LOGIC
-    COALESCE(
-        -- First: Try keeping the original if it is valid
-        SAFE_CAST(lb.fb_ad_id AS INT64),
-        -- Second: Match with metaspend (Campaign + Adset + Ad Names)
-        ms_ad.Ad_ID,
-        -- Third: Match with pf_mapping (Campaign + Adset + Ad Names)
-        pf_ad.Actual_Ad_ID
-    ) AS fb_ad_id
-
-FROM leadbyte_data lb
-
--- Join for Campaign ID (Logic 1)
-LEFT JOIN metaspend_campaigns ms_camp 
-    ON lb.fb_campaign_name = ms_camp.Campaign_name
-LEFT JOIN pf_mapping_data pf_camp 
-    ON lb.fb_campaign_name = pf_camp.fb_campaign_name
-
--- Join for Adset ID (Logic 2)
--- Complex join: Campaign Match AND (Adset Match OR Ad Name matches Adset Name)
-LEFT JOIN metaspend_adsets ms_adset 
-    ON lb.fb_campaign_name = ms_adset.Campaign_name 
-    AND (lb.fb_adset_name = ms_adset.Ad_set_name OR lb.fb_ad_name = ms_adset.Ad_set_name)
--- Secondary lookup: If we have an Ad ID in leadbyte, find its parent Ad Set in metaspend
-LEFT JOIN metaspend_ads ms_ad_lookup
-    ON SAFE_CAST(lb.fb_ad_id AS INT64) = ms_ad_lookup.Ad_ID
-LEFT JOIN pf_mapping_data pf_adset
-    ON lb.fb_campaign_name = pf_adset.fb_campaign_name 
-    AND lb.fb_adset_name = pf_adset.fb_adset_name
-
--- Join for Ad ID (Logic 3)
-LEFT JOIN metaspend_ads ms_ad 
-    ON lb.fb_campaign_name = ms_ad.Campaign_name 
-    AND lb.fb_adset_name = ms_ad.Ad_set_name 
-    AND lb.fb_ad_name = ms_ad.Ad_name
-LEFT JOIN pf_mapping_data pf_ad
-    ON lb.fb_campaign_name = pf_ad.fb_campaign_name 
-    AND lb.fb_adset_name = pf_ad.fb_adset_name
-    AND lb.fb_ad_name = pf_ad.fb_ad_name
+    l.Lead_ID,
+    l.SID,
+    l.SSID,
+    l.Original_Received,
+    l.time_string,
+    l.id_number,
+    l.blds_description,
+    l.blds_mtn,
+    l.blds_cellc,
+    l.blds_blc,
+    l.blds_mtn_BureauStatus,
+    l.blds_mtn_BureauPass,
+    -- Replace fb_ad_id when conditions are met
+    CASE 
+        WHEN (l.concat_ids IS NULL OR l.concat_ids = '') 
+             AND (l.concat_campaign_adset_ad_names IS NOT NULL AND l.concat_campaign_adset_ad_names <> '')
+             AND m.lookup_ad_id IS NOT NULL
+        THEN m.lookup_ad_id
+        ELSE l.fb_ad_id
+    END AS fb_ad_id,
+    -- Replace fb_adset_id when conditions are met
+    CASE 
+        WHEN (l.concat_ids IS NULL OR l.concat_ids = '') 
+             AND (l.concat_campaign_adset_ad_names IS NOT NULL AND l.concat_campaign_adset_ad_names <> '')
+             AND m.lookup_adset_id IS NOT NULL
+        THEN m.lookup_adset_id
+        ELSE l.fb_adset_id
+    END AS fb_adset_id,
+    -- Replace fb_campaign_id when conditions are met
+    CASE 
+        WHEN (l.concat_ids IS NULL OR l.concat_ids = '') 
+             AND (l.fb_campaign_name IS NOT NULL AND l.fb_campaign_name <> '')
+             AND m.lookup_campaign_id IS NOT NULL
+        THEN m.lookup_campaign_id
+        ELSE l.fb_campaign_id
+    END AS fb_campaign_id,
+    l.concat_campaign_adset,
+    l.concat_campaign_adset_ad_names,
+    l.concat_ids,
+    l.fb_clid,
+    l.gclid,
+    l.Id_number_valid,
+    l.fb_campaign_name,
+    l.fb_adset_name,
+    l.fb_ad_name
+FROM leadbyte_data l
+LEFT JOIN mapping_consolidated m
+    ON l.Lead_ID = m.Lead_ID
