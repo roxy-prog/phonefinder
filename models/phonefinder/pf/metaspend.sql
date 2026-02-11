@@ -1,6 +1,4 @@
-    
     {{ config(materialized='table') }}
 
-    select * 
+    select *
     from {{ source('Phonefinder', 'meta_spend') }}
-

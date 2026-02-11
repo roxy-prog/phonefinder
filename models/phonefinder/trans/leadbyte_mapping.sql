@@ -1,9 +1,30 @@
+{{ config(materialized='table') }}
+
 WITH leadbyte_data AS (
-    SELECT * FROM {{ ref('leadbyte') }}
+    SELECT
+    Lead_ID,
+    SID,
+    SSID,
+    created_date,
+    id_number,
+    blds_description,
+    blds_mtn,
+    blds_cellc,
+    blds_blc,
+    blds_mtn_BureauStatus,
+    blds_mtn_BureauPass,
+    fb_ad_id,
+    fb_adset_id,
+    fb_campaign_id,
+    fb_clid,
+    gclid,
+    Id_number_valid,
+    fb_campaign_name,
+    fb_adset_name,
+    fb_ad_name
+    FROM {{ ref('leadbyte_rox') }}
 ),
 
--- Create unique mapping tables from metaspend to avoid row duplication (fan-out)
--- since metaspend likely has multiple rows per campaign (daily data).
 metaspend_campaigns AS (
     SELECT DISTINCT 
         Campaign_name, 
@@ -14,7 +35,6 @@ metaspend_campaigns AS (
 
 metaspend_adsets AS (
     SELECT DISTINCT 
-        Campaign_name, 
         Ad_set_name, 
         Ad_set_ID
     FROM {{ ref('metaspend') }}
@@ -23,80 +43,87 @@ metaspend_adsets AS (
 
 metaspend_ads AS (
     SELECT DISTINCT 
-        Campaign_name, 
-        Ad_set_name, 
         Ad_name, 
-        Ad_ID,
-        Ad_set_ID -- Included for the fallback lookup logic
+        Ad_ID
     FROM {{ ref('metaspend') }}
     WHERE Ad_ID IS NOT NULL
 ),
 
 pf_mapping_data AS (
-    SELECT * FROM {{ source('Phonefinder', 'pf_mapping') }}
+    SELECT 
+        fb_campaign_name,
+        fb_adset_name,
+        fb_ad_name,
+        Actual_Campaign_ID,
+        Actual_Adset_ID,
+        Actual_Ad_ID
+    FROM {{ source('Phonefinder', 'pf_mapping') }}
+),
+
+joined_data AS (
+    SELECT 
+        lb.*, 
+        
+        -- 1. Campaign Name Lookup
+        COALESCE(
+            ms_camp.Campaign_name,
+            pf_camp.fb_campaign_name
+        ) AS _calc_fb_campaign_name,
+
+        -- 2. Adset Name Lookup
+        COALESCE(
+            ms_adset.Ad_set_name,
+            pf_adset.fb_adset_name
+        ) AS _calc_fb_adset_name,
+
+        -- 3. Ad Name Lookup
+        COALESCE(
+            ms_ad.Ad_name,
+            pf_ad.fb_ad_name
+        ) AS _calc_fb_ad_name
+
+    FROM leadbyte_data lb
+
+    -- Join for Campaign Name using ID
+    LEFT JOIN metaspend_campaigns ms_camp 
+        ON SAFE_CAST(lb.fb_campaign_id AS INT64) = ms_camp.Campaign_ID
+    LEFT JOIN (SELECT DISTINCT fb_campaign_name, Actual_Campaign_ID FROM pf_mapping_data) pf_camp 
+        ON SAFE_CAST(lb.fb_campaign_id AS INT64) = pf_camp.Actual_Campaign_ID
+
+    -- Join for Adset Name using ID
+    LEFT JOIN metaspend_adsets ms_adset 
+        ON SAFE_CAST(lb.fb_adset_id AS INT64) = ms_adset.Ad_set_ID
+    LEFT JOIN (SELECT DISTINCT fb_adset_name, Actual_Adset_ID FROM pf_mapping_data) pf_adset
+        ON SAFE_CAST(lb.fb_adset_id AS INT64) = pf_adset.Actual_Adset_ID
+
+    -- Join for Ad Name using ID
+    LEFT JOIN metaspend_ads ms_ad 
+        ON SAFE_CAST(lb.fb_ad_id AS INT64) = ms_ad.Ad_ID
+    LEFT JOIN (SELECT DISTINCT fb_ad_name, Actual_Ad_ID FROM pf_mapping_data) pf_ad
+        ON SAFE_CAST(lb.fb_ad_id AS INT64) = pf_ad.Actual_Ad_ID
 )
 
 SELECT
-    lb.* EXCEPT (fb_campaign_id, fb_adset_id, fb_ad_id),
-
-    -- 1. CAMPAIGN ID LOGIC
-    COALESCE(
-        -- First: Try keeping the original if it is valid (numerical)
-        SAFE_CAST(lb.fb_campaign_id AS INT64),
-        -- Second: Match with metaspend on Campaign Name
-        ms_camp.Campaign_ID,
-        -- Third: Match with pf_mapping on Campaign Name
-        pf_camp.Actual_Campaign_ID
-    ) AS fb_campaign_id,
-
-    -- 2. ADSET ID LOGIC
-    COALESCE(
-        -- First: Try keeping the original if it is valid
-        SAFE_CAST(lb.fb_adset_id AS INT64),
-        -- Second: Match with metaspend (Campaign Name AND (Adset Name OR Ad Name))
-        ms_adset.Ad_set_ID,
-        -- Third: Match with metaspend using just Ad ID (if Ad ID exists in Leadbyte)
-        ms_ad_lookup.Ad_set_ID,
-        -- Fourth: Match with pf_mapping (Campaign Name AND Adset Name)
-        pf_adset.Actual_Adset_ID
-    ) AS fb_adset_id,
-
-    -- 3. AD ID LOGIC
-    COALESCE(
-        -- First: Try keeping the original if it is valid
-        SAFE_CAST(lb.fb_ad_id AS INT64),
-        -- Second: Match with metaspend (Campaign + Adset + Ad Names)
-        ms_ad.Ad_ID,
-        -- Third: Match with pf_mapping (Campaign + Adset + Ad Names)
-        pf_ad.Actual_Ad_ID
-    ) AS fb_ad_id
-
-FROM leadbyte_data lb
-
--- Join for Campaign ID (Logic 1)
-LEFT JOIN metaspend_campaigns ms_camp 
-    ON lb.fb_campaign_name = ms_camp.Campaign_name
-LEFT JOIN pf_mapping_data pf_camp 
-    ON lb.fb_campaign_name = pf_camp.fb_campaign_name
-
--- Join for Adset ID (Logic 2)
--- Complex join: Campaign Match AND (Adset Match OR Ad Name matches Adset Name)
-LEFT JOIN metaspend_adsets ms_adset 
-    ON lb.fb_campaign_name = ms_adset.Campaign_name 
-    AND (lb.fb_adset_name = ms_adset.Ad_set_name OR lb.fb_ad_name = ms_adset.Ad_set_name)
--- Secondary lookup: If we have an Ad ID in leadbyte, find its parent Ad Set in metaspend
-LEFT JOIN metaspend_ads ms_ad_lookup
-    ON SAFE_CAST(lb.fb_ad_id AS INT64) = ms_ad_lookup.Ad_ID
-LEFT JOIN pf_mapping_data pf_adset
-    ON lb.fb_campaign_name = pf_adset.fb_campaign_name 
-    AND lb.fb_adset_name = pf_adset.fb_adset_name
-
--- Join for Ad ID (Logic 3)
-LEFT JOIN metaspend_ads ms_ad 
-    ON lb.fb_campaign_name = ms_ad.Campaign_name 
-    AND lb.fb_adset_name = ms_ad.Ad_set_name 
-    AND lb.fb_ad_name = ms_ad.Ad_name
-LEFT JOIN pf_mapping_data pf_ad
-    ON lb.fb_campaign_name = pf_ad.fb_campaign_name 
-    AND lb.fb_adset_name = pf_ad.fb_adset_name
-    AND lb.fb_ad_name = pf_ad.fb_ad_name
+    case when blds_mtn is null then 'not_checked' else 'checked' end as blds_check,
+    fb_ad_id,
+    _calc_fb_ad_name AS fb_ad_name,
+    fb_adset_id,
+    _calc_fb_adset_name AS fb_adset_name,
+    fb_campaign_id,
+    _calc_fb_campaign_name AS fb_campaign_name,
+    DATE(CAST(created_date AS TIMESTAMP)) AS Original_Received,
+    SPLIT(SPLIT(created_date, 'T')[OFFSET(1)], '+')[OFFSET(0)] as time_string,
+    SID,
+    SSID,
+    Lead_ID,
+    id_number,
+    blds_description,
+    blds_mtn,
+    blds_cellc,
+    blds_blc,
+    blds_mtn_BureauStatus,
+    blds_mtn_BureauPass,
+    fb_clid,
+    gclid,
+    Id_number_valid
+FROM joined_data
