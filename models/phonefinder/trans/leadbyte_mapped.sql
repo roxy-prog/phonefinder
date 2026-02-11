@@ -9,7 +9,6 @@ select
     COALESCE(fb_clid, gclid) as clid,
     fb_campaign_id as campaign_id,
     fb_ad_id as ad_id,
-    blds_check,
     fb_ad_name,
     fb_adset_id,
     fb_adset_name,
@@ -29,7 +28,7 @@ select
     gclid,
     Id_number_valid
 
-from {{ ref('leadbyte_mapping') }})
+from {{ ref('leadbyte_enriched') }})
 ,
 
 final as (
@@ -45,7 +44,6 @@ END AS campaign_id,
     Lead_ID,
     clid,
     ad_id,
-    blds_check,
     fb_ad_name,
     fb_adset_id,
     fb_adset_name,
@@ -68,5 +66,4 @@ from mapped
 
 select *
 from final
-
 

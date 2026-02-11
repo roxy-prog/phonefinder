@@ -3,10 +3,12 @@
 
 WITH google AS (
     SELECT * FROM {{ ref('google_spend') }}
+    where Cost is not null
 ),
 
 meta AS (
     SELECT * FROM {{ ref('metaspend') }}
+    where Amount_spent__ZAR_ is not null
 ),
 
 final as (
