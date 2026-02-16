@@ -9,6 +9,7 @@ original as (
     case when SSID like '%GOOGLE%' then 'Google'
     when SSID like '%FACEBOOK%' then 'Meta' else SSID end as SSID,
     case when SSID like '%GOOGLE%' then '278'    
+    when SSID like '%META%' then '278'    
     when SSID like '%FACEBOOK%' then '278' else SID end as SID,
     id_number,
     blds_description,
@@ -23,7 +24,7 @@ original as (
     fb_clid,
     gclid,
     Id_number_valid,
-    fb_campaign_name,
+    case when SSID like '%FACEBOOKWHATSAPP%' and fb_campaign_name is null then 'whatsapp_campaign' else fb_campaign_name end as fb_campaign_name,
     fb_adset_name,
     fb_ad_name
     from {{ ref('leadbyte_rox') }}
@@ -52,7 +53,7 @@ leadbyte_data AS (
     fb_clid,
     gclid,
     Id_number_valid,
-    case when fb_campaign_name like '%campaign.name%' then '' else fb_campaign_name end as fb_campaign_name,
+    case when fb_campaign_name like '%campaign.name%' then null else fb_campaign_name end as fb_campaign_name,
     fb_adset_name,
     fb_ad_name
     FROM original

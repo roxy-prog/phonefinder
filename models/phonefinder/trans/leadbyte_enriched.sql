@@ -1,4 +1,5 @@
 WITH metaspend_deduped AS (
+    
     SELECT
         Ad_name,
         Campaign_name,
@@ -20,6 +21,7 @@ metaspend_unique AS (
     FROM metaspend_deduped
     WHERE rn = 1
 )
+
 
 SELECT
     l.Lead_ID,

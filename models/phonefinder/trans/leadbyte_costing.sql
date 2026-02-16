@@ -1,175 +1,117 @@
-WITH 
--- Base data from match_sales
-base_data AS (
-  SELECT *
-  FROM {{ ref('match_sales') }}
+with table1 as (
+    select
+        case when ssid like 'WHATSAPPBROADCAST' then null else campaign_id end as campaign_id,
+        case when ssid like '%Meta%' then 'Meta'
+        when ssid like '%FACEBOOK%' then 'Meta'
+        when ssid like '%Google%' then 'Google' else ssid end as ssid,
+        Lead_ID,
+        clid,
+        ad_id,
+        fb_ad_name,
+        fb_adset_id,
+        fb_adset_name,
+        fb_campaign_name,
+        Original_Received,
+        time_string,
+        SID,
+        id_number,
+        blds_description,
+        blds_mtn,
+        blds_cellc,
+        blds_blc,
+        blds_mtn_BureauStatus,
+        blds_mtn_BureauPass,
+        Id_number_valid,
+        mtn_sale,
+        cellc_sale
+    from {{ ref('match_sales') }}
+    -- Added filter here
+    where blds_mtn_BureauStatus is not null
 ),
 
--- Cost data
-cost_data AS (
-  SELECT
-    date,
-    Campaign_id,
-    Ad_set_ID,
-    Ad_ID,
-    cost,
-    platform
-  FROM {{ ref('google_meta_join') }}
+table2 as (
+    select
+        Campaign_id as camp_id,
+        campaign_name,
+        Ad_set_ID,
+        Ad_set_name,
+        Ad_ID as adid,
+        Ad_name,
+        platform,
+        date,
+        sum(cost) as cost,
+        sum(p_leads) as p_leads,
+        sum(q_leads) as q_leads,
+        sum(purchases) as purchases
+        
+    from {{ ref('google_meta_join') }}
+    group by 1, 2, 3, 4, 5, 6, 7, 8
 ),
 
--- Step 1: Ad-level matches (most granular)
-ad_level_allocations AS (
-  SELECT
-    c.date,
-    c.Campaign_id,
-    c.Ad_set_ID,
-    c.Ad_ID,
-    c.platform,
-    c.cost,
-    COUNT(b.Lead_ID) AS match_count
-  FROM cost_data c
-  LEFT JOIN base_data b
-    ON CAST(c.Ad_ID AS STRING) = CAST(b.ad_id AS STRING)
-    AND CAST(c.date AS DATE) = CAST(b.Original_Received AS DATE)
-    AND b.ad_id IS NOT NULL 
-    AND CAST(b.ad_id AS STRING) != ''
-  WHERE c.Ad_ID IS NOT NULL AND CAST(c.Ad_ID AS STRING) != ''
-  GROUP BY c.date, c.Campaign_id, c.Ad_set_ID, c.Ad_ID, c.platform, c.cost
+joined_data as (
+    select * FROM table1
+    LEFT JOIN table2
+        ON table1.Original_Received = table2.date
+        AND table1.ssid = table2.platform
 ),
 
--- Step 2: Adset-level allocations (subtract ad-level costs)
-adset_level_allocations AS (
-  SELECT
-    c.date,
-    c.Campaign_id,
-    c.Ad_set_ID,
-    c.platform,
-    c.cost - COALESCE(SUM(ad_alloc.cost), 0) AS remaining_cost,
-    COUNT(b.Lead_ID) AS match_count
-  FROM cost_data c
-  LEFT JOIN ad_level_allocations ad_alloc
-    ON CAST(c.Ad_set_ID AS STRING) = CAST(ad_alloc.Ad_set_ID AS STRING)
-    AND CAST(c.date AS DATE) = CAST(ad_alloc.date AS DATE)
-  LEFT JOIN base_data b
-    ON CAST(c.Ad_set_ID AS STRING) = CAST(b.fb_adset_id AS STRING)
-    AND CAST(c.date AS DATE) = CAST(b.Original_Received AS DATE)
-    AND (b.ad_id IS NULL OR CAST(b.ad_id AS STRING) = '')
-    AND b.fb_adset_id IS NOT NULL 
-    AND CAST(b.fb_adset_id AS STRING) != ''
-  WHERE c.Ad_set_ID IS NOT NULL AND CAST(c.Ad_set_ID AS STRING) != ''
-  GROUP BY c.date, c.Campaign_id, c.Ad_set_ID, c.platform, c.cost
-),
-
--- Step 3: Campaign-level allocations (subtract ad and adset costs)
-campaign_level_allocations AS (
-  SELECT
-    c.date,
-    c.Campaign_id,
-    c.platform,
-    c.cost 
-      - COALESCE(SUM(ad_alloc.cost), 0)
-      - COALESCE(SUM(CASE WHEN adset_alloc.match_count > 0 THEN adset_alloc.remaining_cost ELSE 0 END), 0) AS remaining_cost,
-    COUNT(b.Lead_ID) AS match_count
-  FROM cost_data c
-  LEFT JOIN ad_level_allocations ad_alloc
-    ON CAST(c.Campaign_id AS STRING) = CAST(ad_alloc.Campaign_id AS STRING)
-    AND CAST(c.date AS DATE) = CAST(ad_alloc.date AS DATE)
-  LEFT JOIN adset_level_allocations adset_alloc
-    ON CAST(c.Campaign_id AS STRING) = CAST(adset_alloc.Campaign_id AS STRING)
-    AND CAST(c.date AS DATE) = CAST(adset_alloc.date AS DATE)
-  LEFT JOIN base_data b
-    ON CAST(c.Campaign_id AS STRING) = CAST(b.campaign_id AS STRING)
-    AND CAST(c.date AS DATE) = CAST(b.Original_Received AS DATE)
-    AND (b.ad_id IS NULL OR CAST(b.ad_id AS STRING) = '')
-    AND (b.fb_adset_id IS NULL OR CAST(b.fb_adset_id AS STRING) = '')
-    AND b.campaign_id IS NOT NULL 
-    AND CAST(b.campaign_id AS STRING) != ''
-  WHERE c.Campaign_id IS NOT NULL AND CAST(c.Campaign_id AS STRING) != ''
-  GROUP BY c.date, c.Campaign_id, c.platform, c.cost
-),
-
--- Step 4: Platform-level allocations (subtract all lower-level costs)
-platform_level_allocations AS (
-  SELECT
-    c.date,
-    c.platform,
-    c.cost 
-      - COALESCE(SUM(ad_alloc.cost), 0)
-      - COALESCE(SUM(CASE WHEN adset_alloc.match_count > 0 THEN adset_alloc.remaining_cost ELSE 0 END), 0)
-      - COALESCE(SUM(CASE WHEN campaign_alloc.match_count > 0 THEN campaign_alloc.remaining_cost ELSE 0 END), 0) AS remaining_cost,
-    COUNT(b.Lead_ID) AS match_count
-  FROM cost_data c
-  LEFT JOIN ad_level_allocations ad_alloc
-    ON CAST(c.platform AS STRING) = CAST(ad_alloc.platform AS STRING)
-    AND CAST(c.date AS DATE) = CAST(ad_alloc.date AS DATE)
-  LEFT JOIN adset_level_allocations adset_alloc
-    ON CAST(c.platform AS STRING) = CAST(adset_alloc.platform AS STRING)
-    AND CAST(c.date AS DATE) = CAST(adset_alloc.date AS DATE)
-  LEFT JOIN campaign_level_allocations campaign_alloc
-    ON CAST(c.platform AS STRING) = CAST(campaign_alloc.platform AS STRING)
-    AND CAST(c.date AS DATE) = CAST(campaign_alloc.date AS DATE)
-  LEFT JOIN base_data b
-    ON CAST(c.platform AS STRING) = CAST(b.ssid AS STRING)
-    AND CAST(c.date AS DATE) = CAST(b.Original_Received AS DATE)
-    AND (b.ad_id IS NULL OR CAST(b.ad_id AS STRING) = '')
-    AND (b.fb_adset_id IS NULL OR CAST(b.fb_adset_id AS STRING) = '')
-    AND (b.campaign_id IS NULL OR CAST(b.campaign_id AS STRING) = '')
-    AND b.ssid IS NOT NULL 
-    AND CAST(b.ssid AS STRING) != ''
-  WHERE c.platform IS NOT NULL AND CAST(c.platform AS STRING) != ''
-  GROUP BY c.date, c.platform, c.cost
+final as (
+    select
+        campaign_id,
+        ssid,
+        Lead_ID,
+        clid,
+        ad_id,
+        fb_ad_name,
+        fb_adset_id,
+        fb_adset_name,
+        fb_campaign_name,
+        Original_Received,
+        time_string,
+        SID,
+        id_number,
+        blds_description,
+        blds_mtn,
+        blds_cellc,
+        blds_blc,
+        blds_mtn_BureauStatus,
+        blds_mtn_BureauPass,
+        Id_number_valid,
+        mtn_sale,
+        cellc_sale,
+        (sum(cost))/(case when (count(ssid) over (partition by Original_Received, ssid order by Original_Received)) = 0 then 1 else (count(Lead_ID) over (partition by Original_Received, ssid order by Original_Received)) end) as cost,
+        (sum(p_leads))/(case when (count(ssid) over (partition by Original_Received, ssid order by Original_Received)) = 0 then 1 else (count(Lead_ID) over (partition by Original_Received, ssid order by Original_Received)) end) as p_leads,
+        (sum(q_leads))/(case when (count(ssid) over (partition by Original_Received, ssid order by Original_Received)) = 0 then 1 else (count(Lead_ID) over (partition by Original_Received, ssid order by Original_Received)) end) as q_leads,
+        (sum(purchases))/(case when (count(ssid) over (partition by Original_Received, ssid order by Original_Received)) = 0 then 1 else (count(Lead_ID) over (partition by Original_Received, ssid order by Original_Received)) end) as purchases
+    from joined_data
+    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
 )
 
--- Final SELECT with cascading cost allocation
-SELECT
-  b.ssid,
-  b.campaign_id,
-  b.Lead_ID,
-  b.clid,
-  b.ad_id,
-  b.fb_ad_name,
-  b.fb_adset_id,
-  b.fb_adset_name,
-  b.fb_campaign_name,
-  b.Original_Received,
-  b.time_string,
-  b.SID,
-  b.id_number,
-  b.blds_description,
-  b.blds_mtn,
-  b.blds_cellc,
-  b.blds_blc,
-  b.blds_mtn_BureauStatus,
-  b.blds_mtn_BureauPass,
-  b.Id_number_valid,
-  b.mtn_sale,
-  b.cellc_sale,
-  -- Waterfall cost allocation logic
-  CASE
-    -- Level 1: Direct ad match
-    WHEN b.ad_id IS NOT NULL AND CAST(b.ad_id AS STRING) != '' THEN
-      COALESCE(SAFE_DIVIDE(ad_alloc.cost, ad_alloc.match_count), 0)
-    -- Level 2: Adset match (no ad_id)
-    WHEN b.fb_adset_id IS NOT NULL AND CAST(b.fb_adset_id AS STRING) != '' THEN
-      COALESCE(SAFE_DIVIDE(adset_alloc.remaining_cost, adset_alloc.match_count), 0)
-    -- Level 3: Campaign match (no ad_id or fb_adset_id)
-    WHEN b.campaign_id IS NOT NULL AND CAST(b.campaign_id AS STRING) != '' THEN
-      COALESCE(SAFE_DIVIDE(campaign_alloc.remaining_cost, campaign_alloc.match_count), 0)
-    -- Level 4: Platform match (no ad_id, fb_adset_id, or campaign_id)
-    WHEN b.ssid IS NOT NULL AND CAST(b.ssid AS STRING) != '' THEN
-      COALESCE(SAFE_DIVIDE(platform_alloc.remaining_cost, platform_alloc.match_count), 0)
-    ELSE 0
-  END AS cost
-FROM base_data b
-LEFT JOIN ad_level_allocations ad_alloc
-  ON CAST(b.ad_id AS STRING) = CAST(ad_alloc.Ad_ID AS STRING)
-  AND CAST(b.Original_Received AS DATE) = CAST(ad_alloc.date AS DATE)
-LEFT JOIN adset_level_allocations adset_alloc
-  ON CAST(b.fb_adset_id AS STRING) = CAST(adset_alloc.Ad_set_ID AS STRING)
-  AND CAST(b.Original_Received AS DATE) = CAST(adset_alloc.date AS DATE)
-LEFT JOIN campaign_level_allocations campaign_alloc
-  ON CAST(b.campaign_id AS STRING) = CAST(campaign_alloc.Campaign_id AS STRING)
-  AND CAST(b.Original_Received AS DATE) = CAST(campaign_alloc.date AS DATE)
-LEFT JOIN platform_level_allocations platform_alloc
-  ON CAST(b.ssid AS STRING) = CAST(platform_alloc.platform AS STRING)
-  AND CAST(b.Original_Received AS DATE) = CAST(platform_alloc.date AS DATE)
+select
+    campaign_id,
+    ssid,
+    Lead_ID,
+    clid,
+    ad_id,
+    fb_ad_name,
+    fb_adset_id,
+    fb_adset_name,
+    fb_campaign_name,
+    Original_Received,
+    time_string,
+    SID,
+    id_number,
+    blds_description,
+    blds_mtn,
+    blds_cellc,
+    blds_blc,
+    blds_mtn_BureauStatus,
+    blds_mtn_BureauPass,
+    Id_number_valid,
+    mtn_sale,
+    cellc_sale,
+    cost,
+    p_leads,
+    q_leads,
+    purchases
+from final
