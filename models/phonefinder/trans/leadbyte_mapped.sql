@@ -2,7 +2,6 @@
 
 with
 
-
 mapped as (
 select
     Lead_ID,
@@ -34,11 +33,11 @@ from {{ ref('leadbyte_enriched') }})
 final as (
 select
 case when ssid like '%GOOGLE%' then 'Google'
-when ssid like 'FACEBOOKWHATSAPP' then 'Meta WhatsApp' 
+when ssid like '%FACEBOOKWHATSAPP%' then 'Meta' 
 when ssid like '%FACEBOOK%' then 'Meta'
-when ssid like 'ORGANIC' then 'Meta' else ssid end as ssid,
+when ssid like 'ORGANIC' then 'Organic' else ssid end as ssid,
 CASE 
-    WHEN ssid LIKE 'FACEBOOKWHATSAPP' THEN '120235589621790327' 
+    WHEN ssid LIKE 'FACEBOOKWHATSAPP' and campaign_id is null THEN '120235589621790327' 
     ELSE CAST(campaign_id AS STRING) 
 END AS campaign_id,
     Lead_ID,

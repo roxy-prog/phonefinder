@@ -1,6 +1,5 @@
 {{ config(materialized='table') }}
 
-
 WITH google AS (
     SELECT * FROM {{ ref('google_spend') }}
     where Cost is not null
@@ -47,11 +46,11 @@ FULL OUTER JOIN meta
 
 select
 date,
-campaign_id as Campaign_id,
+case when (cast(campaign_id as string)) like '120240480508340327' then '120235589621790327' else (cast(campaign_id as string)) end as Campaign_id,
 campaign_name,
 Ad_set_ID,
 Ad_set_name,
-Ad_ID,
+cast(Ad_ID as string) as Ad_ID,
 Ad_name,
 cost,
 p_leads,
